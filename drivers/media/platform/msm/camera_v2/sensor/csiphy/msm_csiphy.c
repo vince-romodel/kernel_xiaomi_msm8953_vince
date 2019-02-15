@@ -2126,10 +2126,7 @@ static int32_t msm_csiphy_cmd(struct csiphy_device *csiphy_dev, void *arg)
 			rc = -EFAULT;
 			break;
 		}
-		if (csiphy_dev->csiphy_sof_debug == SOF_DEBUG_ENABLE) {
-			csiphy_dev->csiphy_sof_debug = SOF_DEBUG_DISABLE;
-			rc = msm_camera_enable_irq(csiphy_dev->irq, false);
-		}
+		csiphy_dev->csiphy_sof_debug = SOF_DEBUG_DISABLE;
 		rc = msm_csiphy_lane_config(csiphy_dev, &csiphy_params);
 		break;
 	case CSIPHY_RELEASE:
