@@ -329,7 +329,9 @@ static int find_fsync_dnodes(struct f2fs_sb_info *sbi, struct list_head *head,
 
 			if (!check_only &&
 					IS_INODE(page) && is_dent_dnode(page)) {
+
 				err = f2fs_recover_inode_page(sbi, page);
+				err = recover_inode_page(sbi, page);
 				if (err)
 					break;
 				quota_inode = true;

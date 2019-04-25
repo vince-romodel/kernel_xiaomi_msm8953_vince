@@ -136,6 +136,84 @@ int squashfs_read_data(struct super_block *sb, u64 index, int length,
 		if (bh[0] == NULL)
 			goto read_failure;
 		b = 1;
+		/* Otherwise, submit the current BIO and create a new one */
+		if (bio)
+			submit_bio(bio);
+		bio_req = kcalloc(1, sizeof(struct squashfs_bio_request),
+				  GFP_NOIO);
+		if (!bio_req)
+			goto req_alloc_failed;
+		bio_req->bh = &req->bh[b];
+		bio = bio_alloc(GFP_NOIO, bio_max_pages);
+		if (!bio)
+			goto bio_alloc_failed;
+		bio->bi_bdev = req->sb->s_bdev;
+		bio->bi_iter.bi_sector = (block + b)
+				       << (msblk->devblksize_log2 - 9);
+		bio_set_op_attrs(bio, REQ_OP_READ, 0);
+		bio->bi_private = bio_req;
+		bio->bi_end_io = squashfs_bio_end_io;
+
+		bio_add_page(bio, bh->b_page, blksz, offset);
+		bio_req->nr_buffers += 1;
+		prev_block = b;
+	}
+	if (bio)
+		submit_bio(bio);
+
+	if (req->synchronous)
+		squashfs_process_blocks(req);
+	else {
+		INIT_WORK(&req->offload, read_wq_handler);
+		schedule_work(&req->offload);
+	}
+	return 0;
+
+bio_alloc_failed:
+	kfree(bio_req);
+req_alloc_failed:
+	unlock_buffer(bh);
+	while (--nr_buffers >= b)
+		if (req->bh[nr_buffers])
+			put_bh(req->bh[nr_buffers]);
+	while (--b >= 0)
+		if (req->bh[b])
+			wait_on_buffer(req->bh[b]);
+getblk_failed:
+	free_read_request(req, -ENOMEM);
+	return -ENOMEM;
+}
+
+static int read_metadata_block(struct squashfs_read_request *req,
+			       u64 *next_index)
+{
+	int ret, error, bytes_read = 0, bytes_uncompressed = 0;
+	struct squashfs_sb_info *msblk = req->sb->s_fs_info;
+
+	if (req->index + 2 > msblk->bytes_used) {
+		free_read_request(req, -EINVAL);
+		return -EINVAL;
+	}
+	req->length = 2;
+
+	/* Do not read beyond the end of the device */
+	if (req->index + req->length > msblk->bytes_used)
+		req->length = msblk->bytes_used - req->index;
+	req->data_processing = SQUASHFS_METADATA;
+
+	/*
+	 * Reading metadata is always synchronous because we don't know the
+	 * length in advance and the function is expected to update
+	 * 'next_index' and return the length.
+	 */
+	req->synchronous = true;
+	req->res = &error;
+	req->bytes_read = &bytes_read;
+	req->bytes_uncompressed = &bytes_uncompressed;
+
+	TRACE("Metadata block @ 0x%llx, %scompressed size %d, src size %d\n",
+	      req->index, req->compressed ? "" : "un", bytes_read,
+	      req->output->length);
 
 		bytes = msblk->devblksize - offset;
 		compressed = SQUASHFS_COMPRESSED(length);
@@ -199,6 +277,22 @@ int squashfs_read_data(struct super_block *sb, u64 index, int length,
 			put_bh(bh[k]);
 		}
 		squashfs_finish_page(output);
+	req->sb = sb;
+	req->index = index;
+	req->output = output;
+
+	if (next_index)
+		*next_index = index;
+
+	if (length)
+		length = read_data_block(req, length, next_index, sync);
+	else
+		length = read_metadata_block(req, next_index);
+
+	if (length < 0) {
+		ERROR("squashfs_read_data failed to read block 0x%llx\n",
+		      (unsigned long long)index);
+		return -EIO;
 	}
 
 	kfree(bh);

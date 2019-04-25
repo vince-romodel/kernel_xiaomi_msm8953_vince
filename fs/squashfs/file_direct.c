@@ -20,12 +20,34 @@
 #include "squashfs.h"
 #include "page_actor.h"
 
+
 static int squashfs_read_cache(struct page *target_page, u64 block, int bsize,
 	int pages, struct page **page, int bytes);
 
 /* Read separately compressed datablock directly into page cache */
 int squashfs_readpage_block(struct page *target_page, u64 block, int bsize,
 	int expected)
+
+static void release_actor_pages(struct page **page, int pages, int error)
+{
+	int i;
+
+	for (i = 0; i < pages; i++) {
+		if (!page[i])
+			continue;
+		flush_dcache_page(page[i]);
+		if (!error)
+			SetPageUptodate(page[i]);
+		else {
+			SetPageError(page[i]);
+			zero_user_segment(page[i], 0, PAGE_SIZE);
+		}
+		unlock_page(page[i]);
+		put_page(page[i]);
+	}
+	kfree(page);
+}
+
 
 {
 	struct inode *inode = target_page->mapping->host;
@@ -74,6 +96,7 @@ int squashfs_readpage_block(struct page *target_page, u64 block, int bsize,
 			missing_pages++;
 		}
 	}
+
 
 	if (missing_pages) {
 		/*
@@ -140,7 +163,18 @@ out:
 	kfree(actor);
 	kfree(page);
 	return res;
+
+	actor = squashfs_page_actor_init(page, actor_pages, 0,
+			release_actor_pages);
+	if (!actor) {
+		release_actor_pages(page, actor_pages, -ENOMEM);
+		kfree(page);
+		return NULL;
+	}
+	return actor;
+
 }
+
 
 
 static int squashfs_read_cache(struct page *target_page, u64 block, int bsize,
@@ -168,6 +202,43 @@ static int squashfs_read_cache(struct page *target_page, u64 block, int bsize,
 		unlock_page(page[n]);
 		if (page[n] != target_page)
 			put_page(page[n]);
+
+{
+	struct squashfs_page_actor *actor;
+	struct inode *inode = mapping->host;
+	struct squashfs_sb_info *msblk = inode->i_sb->s_fs_info;
+	int start_index, end_index, file_end, actor_pages, res;
+	int mask = (1 << (msblk->block_log - PAGE_SHIFT)) - 1;
+
+	/*
+	 * If readpage() is called on an uncompressed datablock, we can just
+	 * read the pages instead of fetching the whole block.
+	 * This greatly improves the performance when a process keep doing
+	 * random reads because we only fetch the necessary data.
+	 * The readahead algorithm will take care of doing speculative reads
+	 * if necessary.
+	 * We can't read more than 1 block even if readahead provides use more
+	 * pages because we don't know yet if the next block is compressed or
+	 * not.
+	 */
+	if (bsize && !SQUASHFS_COMPRESSED_BLOCK(bsize)) {
+		u64 block_end = block + msblk->block_size;
+
+		block += (page_index & mask) * PAGE_SIZE;
+		actor_pages = (block_end - block) / PAGE_SIZE;
+		if (*nr_pages < actor_pages)
+			actor_pages = *nr_pages;
+		start_index = page_index;
+		bsize = min_t(int, bsize, (PAGE_SIZE * actor_pages)
+					  | SQUASHFS_COMPRESSED_BIT_BLOCK);
+	} else {
+		file_end = (i_size_read(inode) - 1) >> PAGE_SHIFT;
+		start_index = page_index & ~mask;
+		end_index = start_index | mask;
+		if (end_index > file_end)
+			end_index = file_end;
+		actor_pages = end_index - start_index + 1;
+
 	}
 
 out:

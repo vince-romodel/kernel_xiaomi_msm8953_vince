@@ -120,6 +120,7 @@ int __init arch_probe_nr_irqs(void)
 }
 #endif
 
+
 #ifdef CONFIG_HOTPLUG_CPU
 static bool migrate_one_irq(struct irq_desc *desc)
 {
